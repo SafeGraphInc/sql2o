@@ -418,10 +418,14 @@ public class Query implements AutoCloseable {
 
     // visible for testing
     PreparedStatement buildPreparedStatement() {
-        return buildPreparedStatement(true);
+        return buildPreparedStatement(0);
     }
 
-    private PreparedStatement buildPreparedStatement(boolean allowArrayParameters) {
+    PreparedStatement buildPreparedStatement(int timeoutSeconds) {
+        return buildPreparedStatement(true, timeoutSeconds);
+    }
+
+    private PreparedStatement buildPreparedStatement(boolean allowArrayParameters, int timeoutSeconds) {
         // array parameter handling
         parsedQuery = ArrayParameters.updateQueryAndParametersIndexes(parsedQuery, paramNameToIdxMap, parameters, allowArrayParameters);
 
@@ -435,6 +439,11 @@ public class Query implements AutoCloseable {
                 } else {
                     preparedStatement = connection.getJdbcConnection().prepareStatement(parsedQuery);
                 }
+
+                if (timeoutSeconds > 0) {
+                    preparedStatement.setQueryTimeout(timeoutSeconds);
+                }
+
             } catch(SQLException ex) {
                 throw new Sql2oException(String.format("Error preparing statement - %s", ex.getMessage()), ex);
             }
@@ -467,11 +476,11 @@ public class Query implements AutoCloseable {
 
         boolean autoCloseConnection = false;
 
-        public ResultSetIterableBase() {
+        public ResultSetIterableBase(int timeoutSeconds) {
             try {
                 start = System.currentTimeMillis();
                 logExecution();
-                rs = buildPreparedStatement().executeQuery();
+                rs = buildPreparedStatement(timeoutSeconds).executeQuery();
                 afterExecQuery = System.currentTimeMillis();
             }
             catch (SQLException ex) {
@@ -520,6 +529,10 @@ public class Query implements AutoCloseable {
         }
     }
 
+    public <T> ResultSetIterable<T> executeAndFetchLazy(final Class<T> returnType) {
+        return executeAndFetchLazyWithTimeout(returnType, 0);
+    }
+
     /**
      * Read a collection lazily. Generally speaking, this should only be used if you are reading MANY
      * results and keeping them all in a Collection would cause memory issues. You MUST call
@@ -528,9 +541,9 @@ public class Query implements AutoCloseable {
      * @param returnType type of each row
      * @return iterable results
      */
-    public <T> ResultSetIterable<T> executeAndFetchLazy(final Class<T> returnType) {
+    public <T> ResultSetIterable<T> executeAndFetchLazyWithTimeout(final Class<T> returnType, int timeoutSeconds) {
         final ResultSetHandlerFactory<T> resultSetHandlerFactory = newResultSetHandlerFactory(returnType);
-        return executeAndFetchLazy(resultSetHandlerFactory);
+        return executeAndFetchLazyWithTimeout(resultSetHandlerFactory, timeoutSeconds);
     }
 
     private <T> ResultSetHandlerFactory<T> newResultSetHandlerFactory(Class<T> returnType) {
@@ -545,6 +558,10 @@ public class Query implements AutoCloseable {
         return builder.newFactory(returnType);
     }
 
+    public <T> ResultSetIterable<T> executeAndFetchLazy(final ResultSetHandlerFactory<T> resultSetHandlerFactory) {
+        return executeAndFetchLazyWithTimeout(resultSetHandlerFactory, 0);
+    }
+
     /**
      * Read a collection lazily. Generally speaking, this should only be used if you are reading MANY
      * results and keeping them all in a Collection would cause memory issues. You MUST call
@@ -553,15 +570,15 @@ public class Query implements AutoCloseable {
      * @param resultSetHandlerFactory factory to provide ResultSetHandler
      * @return iterable results
      */
-    public <T> ResultSetIterable<T> executeAndFetchLazy(final ResultSetHandlerFactory<T> resultSetHandlerFactory) {
+    public <T> ResultSetIterable<T> executeAndFetchLazyWithTimeout(final ResultSetHandlerFactory<T> resultSetHandlerFactory, int timeoutSeconds) {
         final Quirks quirks = getConnection().getSql2o().getQuirks();
-        return new ResultSetIterableBase<T>() {
+        return new ResultSetIterableBase<T>(timeoutSeconds) {
             public Iterator<T> iterator() {
                 return new PojoResultSetIterator<>(rs, isCaseSensitive(), quirks, resultSetHandlerFactory);
             }
         };
     }
-
+    
     /**
      * Read a collection lazily. Generally speaking, this should only be used if you are reading MANY
      * results and keeping them all in a Collection would cause memory issues. You MUST call
@@ -570,9 +587,9 @@ public class Query implements AutoCloseable {
      * @param resultSetHandler ResultSetHandler
      * @return iterable results
      */
-    public <T> ResultSetIterable<T> executeAndFetchLazy(final ResultSetHandler<T> resultSetHandler) {
+    public <T> ResultSetIterable<T> executeAndFetchLazyWithTimeout(final ResultSetHandler<T> resultSetHandler, int timeoutSeconds) {
         final ResultSetHandlerFactory<T> factory = newResultSetHandlerFactory(resultSetHandler);
-        return executeAndFetchLazy(factory);
+        return executeAndFetchLazyWithTimeout(factory, timeoutSeconds);
     }
 
     private static  <T> ResultSetHandlerFactory<T> newResultSetHandlerFactory(final ResultSetHandler<T> resultSetHandler) {
@@ -584,17 +601,29 @@ public class Query implements AutoCloseable {
     }
 
     public <T> List<T> executeAndFetch(Class<T> returnType){
-        return executeAndFetch(newResultSetHandlerFactory(returnType));
+        return executeAndFetchWithTimeout(newResultSetHandlerFactory(returnType), 0);
     }
 
     public <T> List<T> executeAndFetch(ResultSetHandler<T> resultSetHandler){
-        return executeAndFetch(newResultSetHandlerFactory(resultSetHandler));
+        return executeAndFetchWithTimeout(newResultSetHandlerFactory(resultSetHandler), 0);
     }
 
     public <T> List<T> executeAndFetch(ResultSetHandlerFactory<T> factory){
+        return executeAndFetchWithTimeout(factory, 0);
+    }
+
+    public <T> List<T> executeAndFetchWithTimeout(Class<T> returnType, int timeoutSeconds){
+        return executeAndFetchWithTimeout(newResultSetHandlerFactory(returnType), timeoutSeconds);
+    }
+
+    public <T> List<T> executeAndFetchWithTimeout(ResultSetHandler<T> resultSetHandler, int timeoutSeconds){
+        return executeAndFetchWithTimeout(newResultSetHandlerFactory(resultSetHandler), 0);
+    }
+
+    public <T> List<T> executeAndFetchWithTimeout(ResultSetHandlerFactory<T> factory, int timeoutSeconds){
         List<T> list = new ArrayList<>();
 
-        try (ResultSetIterable<T> iterable = executeAndFetchLazy(factory)) {
+        try (ResultSetIterable<T> iterable = executeAndFetchLazyWithTimeout(factory, timeoutSeconds)) {
             for (T item : iterable) {
                 list.add(item);
             }
@@ -604,25 +633,41 @@ public class Query implements AutoCloseable {
     }
 
     public <T> T executeAndFetchFirst(Class<T> returnType){
-        return executeAndFetchFirst(newResultSetHandlerFactory(returnType));
+        return executeAndFetchFirstWithTimeout(newResultSetHandlerFactory(returnType), 0);
     }
 
     public <T> T executeAndFetchFirst(ResultSetHandler<T> resultSetHandler){
-        return executeAndFetchFirst(newResultSetHandlerFactory(resultSetHandler));
+        return executeAndFetchFirstWithTimeout(newResultSetHandlerFactory(resultSetHandler), 0);
     }
 
     public <T> T executeAndFetchFirst(ResultSetHandlerFactory<T> resultSetHandlerFactory){
+        return executeAndFetchFirstWithTimeout(resultSetHandlerFactory, 0);
+    }
 
-        try (ResultSetIterable<T> iterable = executeAndFetchLazy(resultSetHandlerFactory))  {
+    public <T> T executeAndFetchFirstWithTimeout(Class<T> returnType, int timeoutSeconds){
+        return executeAndFetchFirstWithTimeout(newResultSetHandlerFactory(returnType), timeoutSeconds);
+    }
+
+    public <T> T executeAndFetchFirstWithTimeout(ResultSetHandler<T> resultSetHandler, int timeoutSeconds){
+        return executeAndFetchFirstWithTimeout(newResultSetHandlerFactory(resultSetHandler), timeoutSeconds);
+    }
+
+    public <T> T executeAndFetchFirstWithTimeout(ResultSetHandlerFactory<T> resultSetHandlerFactory, int timeoutSeconds){
+
+        try (ResultSetIterable<T> iterable = executeAndFetchLazyWithTimeout(resultSetHandlerFactory, timeoutSeconds))  {
             Iterator<T> iterator = iterable.iterator();
             return iterator.hasNext() ? iterator.next() : null;
         }
     }
 
     public LazyTable executeAndFetchTableLazy() {
+        return executeAndFetchTableLazyWithTimeout(0);
+    }
+
+    public LazyTable executeAndFetchTableLazyWithTimeout(int timeoutSeconds) {
         final LazyTable lt = new LazyTable();
 
-        lt.setRows(new ResultSetIterableBase<Row>() {
+        lt.setRows(new ResultSetIterableBase<Row>(timeoutSeconds) {
             public Iterator<Row> iterator() {
                 return new TableResultSetIterator(rs, isCaseSensitive(), getConnection().getSql2o().getQuirks(), lt);
             }
@@ -632,9 +677,13 @@ public class Query implements AutoCloseable {
     }
 
     public Table executeAndFetchTable() {
+        return executeAndFetchTableWithTimeout(0);
+    }
+
+    public Table executeAndFetchTableWithTimeout(int timeoutSeconds) {
         List<Row> rows = new ArrayList<>();
 
-        try  (LazyTable lt =  executeAndFetchTableLazy()){
+        try  (LazyTable lt =  executeAndFetchTableLazyWithTimeout(timeoutSeconds)){
             for (Row item : lt.rows()) {
                 rows.add(item);
             }
@@ -646,10 +695,14 @@ public class Query implements AutoCloseable {
     }
 
     public Connection executeUpdate(){
+        return executeUpdateWithTimeout(0);
+    }
+
+    public Connection executeUpdateWithTimeout(int timeoutSeconds){
         long start = System.currentTimeMillis();
         try{
             logExecution();
-            PreparedStatement statement = buildPreparedStatement();
+            PreparedStatement statement = buildPreparedStatement(timeoutSeconds);
             this.connection.setResult(statement.executeUpdate());
             this.connection.setKeys(this.returnGeneratedKeys ? statement.getGeneratedKeys() : null);
             connection.setCanGetKeys(this.returnGeneratedKeys);
@@ -672,10 +725,14 @@ public class Query implements AutoCloseable {
     }
 
     public Object executeScalar() {
+        return executeScalarWithTimeout(0);
+    }
+
+    public Object executeScalarWithTimeout(int timeoutSeconds) {
         long start = System.currentTimeMillis();
 
         logExecution();
-        try (final PreparedStatement ps = buildPreparedStatement();
+        try (final PreparedStatement ps = buildPreparedStatement(timeoutSeconds);
              final ResultSet rs = ps.executeQuery()) {
             if (rs.next()) {
                 Object o = getQuirks().getRSVal(rs, 1);
@@ -703,31 +760,42 @@ public class Query implements AutoCloseable {
     }
 
     public <V> V executeScalar(Class<V> returnType){
+        return executeScalarWithTimeout(returnType, 0);
+    }
+
+    public <V> V executeScalarWithTimeout(Class<V> returnType, int timeoutSeconds){
         try {
             Converter<V> converter;
             //noinspection unchecked
             converter = throwIfNull(returnType, getQuirks().converterOf(returnType));
             //noinspection unchecked
             logExecution();
-            return executeScalar(converter);
+            return executeScalarWithTimeout(converter, timeoutSeconds);
         } catch (ConverterException e) {
             throw new Sql2oException("Error occured while converting value from database to type " + returnType, e);
         }
     }
 
     public <V> V executeScalar(Converter<V> converter){
+        return executeScalarWithTimeout(converter, 0);
+    }
+
+    public <V> V executeScalarWithTimeout(Converter<V> converter, int timeoutSeconds){
         try {
             //noinspection unchecked
-            return converter.convert(executeScalar());
+            return converter.convert(executeScalarWithTimeout(timeoutSeconds));
         } catch (ConverterException e) {
             throw new Sql2oException("Error occured while converting value from database", e);
         }
     }
 
 
-
     public <T> List<T> executeScalarList(final Class<T> returnType){
-        return executeAndFetch(newScalarResultSetHandler(returnType));
+        return executeAndFetchWithTimeout(newScalarResultSetHandler(returnType), 0);
+    }
+
+    public <T> List<T> executeScalarListWithTimeout(final Class<T> returnType, int timeoutSeconds){
+        return executeAndFetchWithTimeout(newScalarResultSetHandler(returnType), timeoutSeconds);
     }
 
     @SuppressWarnings("unchecked")
@@ -804,7 +872,7 @@ public class Query implements AutoCloseable {
      */
     public Query addToBatch(){
         try {
-            buildPreparedStatement(false).addBatch();
+            buildPreparedStatement(false, 0).addBatch();
             if (this.maxBatchRecords > 0){
                 if(++this.currentBatchRecords % this.maxBatchRecords == 0) {
                     this.executeBatch();
@@ -838,10 +906,14 @@ public class Query implements AutoCloseable {
     }
 
     public Connection executeBatch() throws Sql2oException {
+        return executeBatchWithTimeout(0);
+    }
+
+    public Connection executeBatchWithTimeout(int timeoutSeconds) throws Sql2oException {
         long start = System.currentTimeMillis();
         try {
             logExecution();
-            PreparedStatement statement = buildPreparedStatement();
+            PreparedStatement statement = buildPreparedStatement(timeoutSeconds);
             connection.setBatchResult(statement.executeBatch());
             this.currentBatchRecords = 0;
             try {
